@@ -98,8 +98,7 @@ L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
 }).addTo(map);
 
 // --- config ---
-const POLL_INTERVAL = 30_000; // ms — matches the frame duration window
-const NUM_FRAMES = 6;         // positions spanning 30s → one new frame every 5s
+const POLL_INTERVAL = 8_000; // ms
 
 const COLORS = {
   subway:   '#3b82f6',
@@ -129,7 +128,7 @@ function makeIcon(color) {
 }
 
 // --- state ---
-const vehicles = {}; // tripId → { marker, animFrame, timeouts }
+const vehicles = {}; // tripId → { marker, rafId, from, to, startTime }
 const statusDot = document.getElementById('dot-indicator');
 const statusText = document.getElementById('status-text');
 
@@ -137,108 +136,59 @@ const statusText = document.getElementById('status-text');
 const BBOX = { north: 52.68, west: 13.09, south: 52.33, east: 13.77 };
 
 async function fetchVehicles() {
-  const url = `https://v6.bvg.transport.rest/radar?north=${BBOX.north}&west=${BBOX.west}&south=${BBOX.south}&east=${BBOX.east}&results=1000&duration=30&frames=${NUM_FRAMES}`;
+  const url = `https://v6.bvg.transport.rest/radar?north=${BBOX.north}&west=${BBOX.west}&south=${BBOX.south}&east=${BBOX.east}&results=1000&duration=30&frames=1`;
   const res = await fetch(url);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const data = await res.json();
   return data.movements ?? [];
 }
 
-// Animate a marker linearly from [fromLat,fromLng] to [toLat,toLng] over durationMs.
-// Calls onDone when complete. Returns a cancel function.
-function animateSegment(marker, from, to, durationMs, onDone) {
-  let rafId;
-  const start = Date.now();
-  function tick() {
-    const t = Math.min((Date.now() - start) / durationMs, 1);
-    marker.setLatLng([
-      from[0] + (to[0] - from[0]) * t,
-      from[1] + (to[1] - from[1]) * t,
-    ]);
-    if (t < 1) {
-      rafId = requestAnimationFrame(tick);
-    } else {
-      onDone?.();
-    }
-  }
-  rafId = requestAnimationFrame(tick);
-  return () => cancelAnimationFrame(rafId);
-}
-
-// Chain through all frames sequentially, each segment covering its real time slice.
-function scheduleFrameChain(state, frames) {
-  // Cancel any running animation and pending timeouts
-  state.cancelAnim?.();
-  state.timeouts?.forEach(clearTimeout);
-  state.timeouts = [];
-
-  for (let i = 0; i < frames.length - 1; i++) {
-    const from = frames[i];
-    const to   = frames[i + 1];
-    const segMs = (to.t - from.t) * 1000;
-    const delayMs = from.t * 1000;
-
-    const tid = setTimeout(() => {
-      state.cancelAnim?.();
-      state.cancelAnim = animateSegment(
-        state.marker,
-        [from.lat, from.lng],
-        [to.lat,   to.lng],
-        segMs,
-        null,
-      );
-    }, delayMs);
-    state.timeouts.push(tid);
-  }
+function animateMarker(state) {
+  const t = Math.min((Date.now() - state.startTime) / POLL_INTERVAL, 1);
+  // linear — no easing, so speed stays constant and dots don't appear to freeze
+  state.marker.setLatLng([
+    state.from[0] + (state.to[0] - state.from[0]) * t,
+    state.from[1] + (state.to[1] - state.from[1]) * t,
+  ]);
+  if (t < 1) state.rafId = requestAnimationFrame(() => animateMarker(state));
 }
 
 function updateVehicles(movements) {
   const seen = new Set();
 
   for (const mov of movements) {
-    const id = mov.tripId;
-    if (!id) continue;
+    const id  = mov.tripId;
+    const loc = mov.location;
+    if (!id || !loc) continue;
     seen.add(id);
 
-    // With frames>1 the API puts all positions in mov.frames; mov.location may be absent.
-    const rawFrames = Array.isArray(mov.frames) && mov.frames.length > 0
-      ? mov.frames
-      : mov.location ? [{ t: 0, location: mov.location }] : [];
-
-    const frames = rawFrames
-      .filter(f => f.location?.latitude != null)
-      .map(f => ({
-        t:   f.t ?? 0,
-        lat: f.location.latitude,
-        lng: f.location.longitude,
-      }));
-
-    if (frames.length === 0) continue;
-
+    const lat     = loc.latitude;
+    const lng     = loc.longitude;
     const product = mov.line?.product ?? 'bus';
     const color   = productColor(product);
     const label   = mov.line?.name ?? product;
     const dir     = mov.direction ?? '';
 
     if (vehicles[id]) {
-      scheduleFrameChain(vehicles[id], frames);
+      const s = vehicles[id];
+      cancelAnimationFrame(s.rafId);
+      s.from      = [s.marker.getLatLng().lat, s.marker.getLatLng().lng];
+      s.to        = [lat, lng];
+      s.startTime = Date.now();
+      animateMarker(s);
     } else {
-      const marker = L.marker([frames[0].lat, frames[0].lng], { icon: makeIcon(color) })
+      const marker = L.marker([lat, lng], { icon: makeIcon(color) })
         .bindTooltip(`<b>${label}</b><br>${dir}`, { direction: 'top', offset: [0, -4] })
         .addTo(map);
-      const state = { marker, cancelAnim: null, timeouts: [] };
-      vehicles[id] = state;
-      scheduleFrameChain(state, frames);
+      const s = { marker, rafId: null, from: [lat, lng], to: [lat, lng], startTime: Date.now() };
+      vehicles[id] = s;
     }
   }
 
-  // Remove vehicles no longer in the response
   for (const id of Object.keys(vehicles)) {
     if (!seen.has(id)) {
-      const s = vehicles[id];
-      s.cancelAnim?.();
-      s.timeouts?.forEach(clearTimeout);
-      s.marker.remove();
+      cancelAnimationFrame(vehicles[id].rafId);
+      vehicles[id].marker.remove();
       delete vehicles[id];
     }
   }
