@@ -207,11 +207,15 @@ function updateVehicles(movements) {
       ? mov.frames
       : [{ t: 0, location: mov.location }];
 
-    const frames = rawFrames.map(f => ({
-      t:   f.t ?? 0,
-      lat: f.location.latitude,
-      lng: f.location.longitude,
-    }));
+    const frames = rawFrames
+      .filter(f => f.location?.latitude != null)
+      .map(f => ({
+        t:   f.t ?? 0,
+        lat: f.location.latitude,
+        lng: f.location.longitude,
+      }));
+
+    if (frames.length === 0) continue;
 
     const product = mov.line?.product ?? 'bus';
     const color   = productColor(product);
