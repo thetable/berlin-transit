@@ -98,7 +98,7 @@ L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
 }).addTo(map);
 
 // --- config ---
-const POLL_INTERVAL = 10_000; // ms
+const POLL_INTERVAL = 5_000; // ms
 
 const COLORS = {
   subway:   '#3b82f6',
@@ -128,11 +128,7 @@ function makeIcon(color) {
 }
 
 // --- state ---
-// vehicles[id] = { marker, prevLat, prevLng, lat, lng, pollTime }
-// prevLat/prevLng is the position from the poll *before* last — used to derive velocity.
-// Each animation frame extrapolates: pos = curr + velocity * elapsed_since_poll
-// so dots move continuously even between polls.
-const vehicles = {};
+const vehicles = {}; // tripId → { marker, from, to, startTime, rafId }
 const statusDot = document.getElementById('dot-indicator');
 const statusText = document.getElementById('status-text');
 
@@ -147,20 +143,14 @@ async function fetchVehicles() {
   return data.movements ?? [];
 }
 
-// Single global animation loop — extrapolates every vehicle every frame.
-function startAnimationLoop() {
-  function tick() {
-    const now = Date.now();
-    for (const v of Object.values(vehicles)) {
-      const elapsed = now - v.pollTime;
-      // velocity in degrees/ms derived from the last two known positions
-      const vLat = (v.lat - v.prevLat) / POLL_INTERVAL;
-      const vLng = (v.lng - v.prevLng) / POLL_INTERVAL;
-      v.marker.setLatLng([v.lat + vLat * elapsed, v.lng + vLng * elapsed]);
-    }
-    requestAnimationFrame(tick);
-  }
-  requestAnimationFrame(tick);
+function animateMarker(state) {
+  const t = Math.min((Date.now() - state.startTime) / POLL_INTERVAL, 1);
+  const ease = t < 0.5 ? 4*t*t*t : 1 - Math.pow(-2*t+2, 3)/2;
+  state.marker.setLatLng([
+    state.from[0] + (state.to[0] - state.from[0]) * ease,
+    state.from[1] + (state.to[1] - state.from[1]) * ease,
+  ]);
+  if (t < 1) state.rafId = requestAnimationFrame(() => animateMarker(state));
 }
 
 function updateVehicles(movements) {
@@ -178,27 +168,25 @@ function updateVehicles(movements) {
     const color   = productColor(product);
     const label   = mov.line?.name ?? product;
     const dir     = mov.direction ?? '';
-    const now     = Date.now();
 
     if (vehicles[id]) {
-      const v = vehicles[id];
-      // Shift current → previous, update current
-      v.prevLat  = v.lat;
-      v.prevLng  = v.lng;
-      v.lat      = lat;
-      v.lng      = lng;
-      v.pollTime = now;
+      const s = vehicles[id];
+      cancelAnimationFrame(s.rafId);
+      s.from      = [s.marker.getLatLng().lat, s.marker.getLatLng().lng];
+      s.to        = [lat, lng];
+      s.startTime = Date.now();
+      animateMarker(s);
     } else {
       const marker = L.marker([lat, lng], { icon: makeIcon(color) })
         .bindTooltip(`<b>${label}</b><br>${dir}`, { direction: 'top', offset: [0, -4] })
         .addTo(map);
-      // No previous position yet — set prev = curr so velocity starts at 0
-      vehicles[id] = { marker, prevLat: lat, prevLng: lng, lat, lng, pollTime: now };
+      vehicles[id] = { marker, from: [lat, lng], to: [lat, lng], startTime: Date.now(), rafId: null };
     }
   }
 
   for (const id of Object.keys(vehicles)) {
     if (!seen.has(id)) {
+      cancelAnimationFrame(vehicles[id].rafId);
       vehicles[id].marker.remove();
       delete vehicles[id];
     }
@@ -222,7 +210,6 @@ async function poll() {
   }
 }
 
-startAnimationLoop();
 poll();
 setInterval(poll, POLL_INTERVAL);
 </script>
