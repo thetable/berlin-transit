@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Berlin Live Transit</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: system-ui, sans-serif; background: #111; color: #fff; height: 100dvh; display: flex; flex-direction: column; }
+
+    #map { flex: 1; }
+
+    #hud {
+      position: absolute;
+      top: 12px;
+      left: 12px;
+      z-index: 1000;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    #status {
+      background: rgba(0,0,0,.72);
+      backdrop-filter: blur(6px);
+      border: 1px solid rgba(255,255,255,.12);
+      border-radius: 8px;
+      padding: 8px 12px;
+      font-size: 13px;
+      color: #ccc;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    #dot-indicator {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #4ade80;
+      flex-shrink: 0;
+    }
+    #dot-indicator.stale { background: #f59e0b; }
+    #dot-indicator.error { background: #f87171; }
+
+    #legend {
+      background: rgba(0,0,0,.72);
+      backdrop-filter: blur(6px);
+      border: 1px solid rgba(255,255,255,.12);
+      border-radius: 8px;
+      padding: 10px 12px;
+      font-size: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+    }
+    .legend-row { display: flex; align-items: center; gap: 7px; color: #ccc; }
+    .legend-dot {
+      width: 10px; height: 10px;
+      border-radius: 50%;
+      flex-shrink: 0;
+      border: 1.5px solid rgba(255,255,255,.3);
+    }
+  </style>
+</head>
+<body>
+
+<div id="hud">
+  <div id="status">
+    <div id="dot-indicator"></div>
+    <span id="status-text">Connecting…</span>
+  </div>
+  <div id="legend">
+    <div class="legend-row"><div class="legend-dot" style="background:#3b82f6"></div> U-Bahn</div>
+    <div class="legend-row"><div class="legend-dot" style="background:#22c55e"></div> S-Bahn</div>
+    <div class="legend-row"><div class="legend-dot" style="background:#ef4444"></div> Tram</div>
+    <div class="legend-row"><div class="legend-dot" style="background:#a855f7"></div> Bus</div>
+    <div class="legend-row"><div class="legend-dot" style="background:#06b6d4"></div> Ferry</div>
+  </div>
+</div>
+
+<div id="map"></div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+// --- map setup ---
+const map = L.map('map', {
+  center: [52.52, 13.405],
+  zoom: 12,
+  zoomControl: false,
+});
+L.control.zoom({ position: 'bottomright' }).addTo(map);
+
+L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+  attribution: '&copy; OpenStreetMap &copy; CARTO',
+  maxZoom: 19,
+}).addTo(map);
+
+// --- config ---
+const POLL_INTERVAL = 10_000; // ms
+const ANIM_DURATION = POLL_INTERVAL * 0.9; // animate almost full interval
+
+const COLORS = {
+  subway:   '#3b82f6',
+  suburban: '#22c55e',
+  tram:     '#ef4444',
+  bus:      '#a855f7',
+  ferry:    '#06b6d4',
+  express:  '#f59e0b',
+  regional: '#f59e0b',
+};
+
+function productColor(product) {
+  return COLORS[product] ?? '#888';
+}
+
+function makeIcon(color) {
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12">
+    <circle cx="6" cy="6" r="5" fill="${color}" stroke="rgba(255,255,255,0.4)" stroke-width="1.5"/>
+  </svg>`;
+  return L.divIcon({
+    html: svg,
+    className: '',
+    iconSize: [12, 12],
+    iconAnchor: [6, 6],
+    popupAnchor: [0, -8],
+  });
+}
+
+// --- state ---
+const vehicles = {}; // tripId → { marker, from, to, startTime, animFrame }
+const statusDot = document.getElementById('dot-indicator');
+const statusText = document.getElementById('status-text');
+
+// --- bounding box covering all of Berlin ---
+const BBOX = { north: 52.68, west: 13.09, south: 52.33, east: 13.77 };
+
+async function fetchVehicles() {
+  const url = `https://v6.bvg.transport.rest/radar?north=${BBOX.north}&west=${BBOX.west}&south=${BBOX.south}&east=${BBOX.east}&results=1000&duration=30&frames=1`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const data = await res.json();
+  return data.movements ?? [];
+}
+
+function animateMarker(state) {
+  const elapsed = Date.now() - state.startTime;
+  const t = Math.min(elapsed / ANIM_DURATION, 1);
+  // ease in-out cubic
+  const ease = t < 0.5 ? 4*t*t*t : 1 - Math.pow(-2*t+2, 3)/2;
+  const lat = state.from[0] + (state.to[0] - state.from[0]) * ease;
+  const lng = state.from[1] + (state.to[1] - state.from[1]) * ease;
+  state.marker.setLatLng([lat, lng]);
+  if (t < 1) {
+    state.animFrame = requestAnimationFrame(() => animateMarker(state));
+  }
+}
+
+function updateVehicles(movements) {
+  const seen = new Set();
+
+  for (const mov of movements) {
+    const id = mov.tripId;
+    if (!id || !mov.location) continue;
+    seen.add(id);
+
+    const { latitude: lat, longitude: lng } = mov.location;
+    const product = mov.line?.product ?? 'bus';
+    const color = productColor(product);
+    const label = mov.line?.name ?? product;
+    const dir = mov.direction ?? '';
+
+    if (vehicles[id]) {
+      // update existing marker
+      const state = vehicles[id];
+      cancelAnimationFrame(state.animFrame);
+      state.from = [state.marker.getLatLng().lat, state.marker.getLatLng().lng];
+      state.to = [lat, lng];
+      state.startTime = Date.now();
+      animateMarker(state);
+    } else {
+      // create new marker
+      const marker = L.marker([lat, lng], { icon: makeIcon(color) })
+        .bindTooltip(`<b>${label}</b><br>${dir}`, { direction: 'top', offset: [0, -4] })
+        .addTo(map);
+      const state = { marker, from: [lat, lng], to: [lat, lng], startTime: Date.now(), animFrame: null };
+      vehicles[id] = state;
+    }
+  }
+
+  // remove vehicles that are no longer in the response
+  for (const id of Object.keys(vehicles)) {
+    if (!seen.has(id)) {
+      vehicles[id].marker.remove();
+      cancelAnimationFrame(vehicles[id].animFrame);
+      delete vehicles[id];
+    }
+  }
+}
+
+function setStatus(state, text) {
+  statusDot.className = state === 'ok' ? '' : state;
+  statusText.textContent = text;
+}
+
+async function poll() {
+  try {
+    const movements = await fetchVehicles();
+    updateVehicles(movements);
+    const now = new Date().toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    setStatus('ok', `${Object.keys(vehicles).length} vehicles · ${now}`);
+  } catch (err) {
+    console.error(err);
+    setStatus('error', `Error: ${err.message}`);
+  }
+}
+
+poll();
+setInterval(poll, POLL_INTERVAL);
+</script>
+</body>
+</html>
