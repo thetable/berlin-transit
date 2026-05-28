@@ -197,15 +197,13 @@ function updateVehicles(movements) {
 
   for (const mov of movements) {
     const id = mov.tripId;
-    if (!id || !mov.location) continue;
+    if (!id) continue;
     seen.add(id);
 
-    // Build a normalised frames array [{t, lat, lng}, ...]
-    // The API returns mov.frames as [{t, location:{latitude,longitude}}]
-    // t=0 is the current moment; larger t values are predictions.
-    const rawFrames = Array.isArray(mov.frames) && mov.frames.length > 1
+    // With frames>1 the API puts all positions in mov.frames; mov.location may be absent.
+    const rawFrames = Array.isArray(mov.frames) && mov.frames.length > 0
       ? mov.frames
-      : [{ t: 0, location: mov.location }];
+      : mov.location ? [{ t: 0, location: mov.location }] : [];
 
     const frames = rawFrames
       .filter(f => f.location?.latitude != null)
