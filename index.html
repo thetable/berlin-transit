@@ -170,8 +170,17 @@ function makeIcon(color) {
   });
 }
 
+const SHADOW_ICON = L.divIcon({
+  html: `<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12">
+    <circle cx="6" cy="6" r="5" fill="rgba(255,255,255,0.18)" stroke="rgba(255,255,255,0.25)" stroke-width="1.5"/>
+  </svg>`,
+  className: '',
+  iconSize: [12, 12],
+  iconAnchor: [6, 6],
+});
+
 // --- state ---
-const vehicles = {}; // tripId → { marker, from, to, startTime, rafId }
+const vehicles = {}; // tripId → { marker, shadow, from, to, startTime, rafId }
 const statusDot = document.getElementById('dot-indicator');
 const statusText = document.getElementById('status-text');
 
@@ -215,21 +224,24 @@ function updateVehicles(movements) {
     if (vehicles[id]) {
       const s = vehicles[id];
       cancelAnimationFrame(s.rafId);
+      s.shadow.setLatLng([lat, lng]);
       s.from      = [s.marker.getLatLng().lat, s.marker.getLatLng().lng];
       s.to        = [lat, lng];
       s.startTime = Date.now();
       animateMarker(s);
     } else {
+      const shadow = L.marker([lat, lng], { icon: SHADOW_ICON, zIndexOffset: -100, interactive: false }).addTo(map);
       const marker = L.marker([lat, lng], { icon: makeIcon(color) })
         .bindTooltip(`<b>${label}</b><br>${dir}`, { direction: 'top', offset: [0, -4] })
         .addTo(map);
-      vehicles[id] = { marker, from: [lat, lng], to: [lat, lng], startTime: Date.now(), rafId: null };
+      vehicles[id] = { marker, shadow, from: [lat, lng], to: [lat, lng], startTime: Date.now(), rafId: null };
     }
   }
 
   for (const id of Object.keys(vehicles)) {
     if (!seen.has(id)) {
       cancelAnimationFrame(vehicles[id].rafId);
+      vehicles[id].shadow.remove();
       vehicles[id].marker.remove();
       delete vehicles[id];
     }
