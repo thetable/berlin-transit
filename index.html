@@ -179,8 +179,26 @@ const SHADOW_ICON = L.divIcon({
   iconAnchor: [6, 6],
 });
 
+function makeBadgeIcon(color, label, product) {
+  const safe = label.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const w = Math.max(22, safe.length * 7 + 10);
+  const h = 16;
+  const r = product === 'suburban' ? h / 2 : product === 'subway' ? 2 : 3;
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}">
+    <rect x="0.5" y="0.5" width="${w - 1}" height="${h - 1}" rx="${r}" fill="${color}" stroke="rgba(255,255,255,0.3)" stroke-width="1"/>
+    <text x="${w / 2}" y="${h / 2 + 0.5}" font-family="system-ui,sans-serif" font-size="9" font-weight="700" fill="white" text-anchor="middle" dominant-baseline="middle">${safe}</text>
+  </svg>`;
+  return L.divIcon({
+    html: svg,
+    className: '',
+    iconSize: [w, h],
+    iconAnchor: [w / 2, h / 2],
+    popupAnchor: [0, -10],
+  });
+}
+
 // --- state ---
-const vehicles = {}; // tripId → { marker, shadow, from, to, startTime, rafId }
+const vehicles = {}; // tripId → { marker, shadow, color, label, product, isBadge, from, to, startTime, rafId }
 const statusDot = document.getElementById('dot-indicator');
 const statusText = document.getElementById('status-text');
 
@@ -234,7 +252,7 @@ function updateVehicles(movements) {
       const marker = L.marker([lat, lng], { icon: makeIcon(color) })
         .bindTooltip(`<b>${label}</b><br>${dir}`, { direction: 'top', offset: [0, -4] })
         .addTo(map);
-      vehicles[id] = { marker, shadow, from: [lat, lng], to: [lat, lng], startTime: Date.now(), rafId: null };
+      vehicles[id] = { marker, shadow, color, label, product, isBadge: false, from: [lat, lng], to: [lat, lng], startTime: Date.now(), rafId: null };
     }
   }
 
@@ -246,6 +264,8 @@ function updateVehicles(movements) {
       delete vehicles[id];
     }
   }
+
+  updateIconMode();
 }
 
 function setStatus(state, text) {
@@ -264,6 +284,42 @@ async function poll() {
     setStatus('error', `Error: ${err.message}`);
   }
 }
+
+// --- badge / dot switching ---
+const BADGE_ZOOM = 14;
+const BADGE_CROWD_PX = 36; // min pixel distance between badge centres
+
+function updateIconMode() {
+  const useBadges = map.getZoom() >= BADGE_ZOOM;
+  const entries = Object.values(vehicles);
+
+  if (!useBadges) {
+    for (const s of entries) {
+      if (s.isBadge) { s.marker.setIcon(makeIcon(s.color)); s.isBadge = false; }
+    }
+    return;
+  }
+
+  const pts = entries.map(s => map.latLngToContainerPoint(s.marker.getLatLng()));
+  const badgePts = []; // only centres of markers that actually got a badge
+
+  for (let i = 0; i < entries.length; i++) {
+    const pt = pts[i];
+    let crowded = false;
+    for (const bp of badgePts) {
+      const dx = pt.x - bp.x, dy = pt.y - bp.y;
+      if (dx * dx + dy * dy < BADGE_CROWD_PX * BADGE_CROWD_PX) { crowded = true; break; }
+    }
+    const s = entries[i];
+    if (!crowded !== s.isBadge) {
+      s.isBadge = !crowded;
+      s.marker.setIcon(s.isBadge ? makeBadgeIcon(s.color, s.label, s.product) : makeIcon(s.color));
+    }
+    if (!crowded) badgePts.push(pt);
+  }
+}
+
+map.on('zoomend', updateIconMode);
 
 poll();
 setInterval(poll, POLL_INTERVAL);
